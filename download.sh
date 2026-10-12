@@ -20,6 +20,10 @@
 # Рядки з консолі браузера теж підходять (їх друкує track-videos.js):
 #   download "https://media.kwigacdn.com/..../video.m3u8"
 #
+# Після скачування файл перепаковується у звичайний MP4 (faststart),
+# щоб Telegram відкривав його як відео, а не як документ.
+# Для цього потрібен ffmpeg: sudo apt install ffmpeg
+#
 # Готові файли лягають у папку videos/ поруч зі скриптом.
 # Якщо з'явиться 403, покладіть cookies.txt (формат Netscape) поруч зі скриптом
 # і поставте yt-dlp: pip install -U yt-dlp
@@ -261,6 +265,11 @@ run_ytdlp() {
     cookie_args+=(--cookies "$ROOT/cookies.txt")
   fi
 
+  local -a ffmpeg_args=()
+  if command -v ffmpeg >/dev/null 2>&1; then
+    ffmpeg_args+=(--hls-prefer-ffmpeg --remux-video mp4)
+  fi
+
   "${cmd[@]}" \
     --no-playlist \
     --retries 10 \
@@ -269,6 +278,7 @@ run_ytdlp() {
     --add-header "Origin:${ORIGIN}" \
     --user-agent "$UA" \
     --merge-output-format mp4 \
+    "${ffmpeg_args[@]}" \
     "${cookie_args[@]}" \
     -o "$dest" \
     "$playlist"
@@ -283,7 +293,70 @@ run_ffmpeg() {
     -i "$playlist" \
     -map 0:v:0 -map 0:a:0 \
     -c copy -bsf:a aac_adtstoasc \
+    -movflags +faststart \
     "$dest"
+}
+
+is_playable_mp4() {
+  local f="$1"
+  local kind
+  command -v ffprobe >/dev/null 2>&1 || return 1
+  kind="$(ffprobe -v error -show_entries format=format_name -of default=nw=1:nk=1 "$f" 2>/dev/null || true)"
+  [[ "$kind" == *mp4* || "$kind" == *mov* ]] || return 1
+  head -c 2097152 "$f" | grep -a -q moov
+}
+
+to_telegram_mp4() {
+  local src="$1"
+  local tmp
+  [[ -f "$src" ]] || return 0
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    if (( FFMPEG_WARNED == 0 )); then
+      FFMPEG_WARNED=1
+      echo "Telegram покаже це як файл, поки немає ffmpeg."
+      echo "Поставте його і запустіть скрипт ще раз: sudo apt install ffmpeg"
+    fi
+    return 0
+  fi
+  if is_playable_mp4 "$src"; then
+    return 0
+  fi
+
+  echo "Пакую для Telegram: $(basename "$src")"
+  tmp="${src}.telegram.mp4"
+  if ! ffmpeg -y -hide_banner -loglevel error \
+      -i "$src" \
+      -map 0:v:0 -map "0:a:0?" \
+      -c copy -bsf:a aac_adtstoasc \
+      -movflags +faststart \
+      "$tmp"; then
+    rm -f "$tmp"
+    if ! ffmpeg -y -hide_banner -loglevel error \
+        -i "$src" \
+        -map 0:v:0 -map "0:a:0?" \
+        -c copy \
+        -movflags +faststart \
+        "$tmp"; then
+      rm -f "$tmp"
+      echo "Не вдалося перепакувати: $(basename "$src")"
+      return 1
+    fi
+  fi
+  mv -f -- "$tmp" "$src"
+}
+
+fix_existing_videos() {
+  local f
+  local restore=0
+  mkdir -p "$OUT_DIR"
+  shopt -q nullglob || restore=1
+  shopt -s nullglob
+  for f in "$OUT_DIR"/*.mp4; do
+    [[ "$(basename "$f")" == .* ]] && continue
+    to_telegram_mp4 "$f" || true
+  done
+  (( restore == 1 )) && shopt -u nullglob
+  return 0
 }
 
 download_one() {
@@ -329,6 +402,7 @@ download_one() {
     fi
   fi
 
+  to_telegram_mp4 "$dest" || true
   echo "Готово: $dest"
 }
 
@@ -403,7 +477,9 @@ if [[ "${#URLS[@]}" -eq 0 ]]; then
   exit 1
 fi
 
+FFMPEG_WARNED=0
 renumber_existing
+fix_existing_videos
 serial="$(next_serial)"
 
 failed=0
