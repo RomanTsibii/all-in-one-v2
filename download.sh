@@ -3,12 +3,18 @@
 #
 # Як користуватись:
 #   1. Вставте посилання в самий кінець цього файлу (під рядком # LINKS).
-#      Підійде і .m3u8, і сегмент .ts на кшталт seg-2-v1-a1.ts.
+#      Назву пишіть у наступних лапках. Без лапок ім'я береться з посилання.
+#        https://..../seg-1-v1-a1.ts "Антицелюлітний комплекс"
+#        https://..../next.m3u8 "Урок 2"
 #   2. Запустіть:
 #        bash download.sh
 #
-# Можна і без редагування файлу — посилання в кінці команди:
-#   bash download.sh "https://media.kwigacdn.com/..../seg-2-v1-a1.ts?timestamp=..."
+# Файли отримують номер за порядком рядків:
+#   videos/01 - Антицелюлітний комплекс.mp4
+#   videos/02 - Урок 2.mp4
+#
+# Те саме з командного рядка — посилання, потім назва в лапках:
+#   bash download.sh "https://media.kwigacdn.com/..../seg-1-v1-a1.ts" "Антицелюлітний комплекс"
 #
 # Готові файли лягають у папку videos/ поруч зі скриптом.
 # Якщо з'явиться 403, покладіть cookies.txt (формат Netscape) поруч зі скриптом
@@ -49,7 +55,7 @@ to_playlist() {
   printf '%s\n' "$clean"
 }
 
-output_name() {
+auto_stem() {
   local src="$1"
   local playlist="$2"
   local base=""
@@ -62,8 +68,49 @@ output_name() {
     base="$(basename "$playlist" .m3u8)"
   fi
 
-  base="${base//[^A-Za-z0-9._-]/_}"
-  printf '%s.mp4\n' "$base"
+  sanitize_title "$base"
+}
+
+sanitize_title() {
+  local t="$1"
+  t="${t//$'\r'/}"
+  t="${t//$'\n'/ }"
+  t="${t//\// - }"
+  t="${t//\\/ - }"
+  t="${t//:/ -}"
+  t="${t//\*/}"
+  t="${t//\?/}"
+  t="${t//\"/}"
+  t="${t//\'/}"
+  t="${t//</}"
+  t="${t//>/}"
+  t="${t//|/ - }"
+  while [[ "$t" == *"  "* ]]; do
+    t="${t//  / }"
+  done
+  t="${t#"${t%%[![:space:].]*}"}"
+  t="${t%"${t##*[![:space:].]}"}"
+  printf '%s\n' "$t"
+}
+
+file_name() {
+  local src="$1"
+  local playlist="$2"
+  local number="$3"
+  local title="$4"
+  local label=""
+
+  if [[ -n "$title" ]]; then
+    label="$(sanitize_title "$title")"
+  fi
+  if [[ -z "$label" ]]; then
+    label="$(auto_stem "$src" "$playlist")"
+  fi
+  if [[ -z "$label" ]]; then
+    label="video"
+  fi
+
+  printf '%s - %s.mp4\n' "$number" "$label"
 }
 
 run_ytdlp() {
@@ -110,6 +157,8 @@ run_ffmpeg() {
 
 download_one() {
   local src="$1"
+  local number="$2"
+  local title="${3:-}"
   local playlist dest name
 
   playlist="$(to_playlist "$src")"
@@ -119,7 +168,7 @@ download_one() {
     return 1
   fi
 
-  name="$(output_name "$src" "$playlist")"
+  name="$(file_name "$src" "$playlist" "$number" "$title")"
   mkdir -p "$OUT_DIR"
   dest="$OUT_DIR/$name"
 
@@ -145,34 +194,81 @@ download_one() {
   echo "Готово: $dest"
 }
 
-collect_links() {
-  local line
-  if [[ "$#" -gt 0 ]]; then
-    printf '%s\n' "$@"
-  fi
-  awk 'BEGIN{p=0} /^# LINKS[[:space:]]*$/{p=1; next} p{print}' "$ROOT/download.sh" \
-    | while IFS= read -r line; do
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
-        [[ -z "$line" || "$line" == \#* ]] && continue
-        printf '%s\n' "$line"
-      done
+URLS=()
+TITLES=()
+
+add_entry() {
+  local url="$1"
+  local title="${2:-}"
+  url="${url#"${url%%[![:space:]]*}"}"
+  url="${url%"${url##*[![:space:]]}"}"
+  [[ -z "$url" || "$url" == \#* ]] && return 0
+  URLS+=("$url")
+  TITLES+=("$title")
 }
 
-mapfile -t LINKS < <(collect_links "$@")
+split_line() {
+  local line="$1"
+  local url rest title
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  [[ -z "$line" || "$line" == \#* ]] && return 0
 
-if [[ "${#LINKS[@]}" -eq 0 ]]; then
+  url="${line%%[[:space:]]*}"
+  title=""
+  if [[ "$line" != "$url" ]]; then
+    rest="${line#"$url"}"
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    rest="${rest%"${rest##*[![:space:]]}"}"
+    if [[ ${#rest} -ge 2 && ( "$rest" == \"*\" || "$rest" == \'*\' ) ]]; then
+      title="${rest:1:$((${#rest} - 2))}"
+    else
+      title="$rest"
+    fi
+  fi
+  add_entry "$url" "$title"
+}
+
+args=("$@")
+i=0
+while (( i < ${#args[@]} )); do
+  url="${args[$i]}"
+  title=""
+  next=$((i + 1))
+  if (( next < ${#args[@]} )); then
+    nxt="${args[$next]}"
+    if [[ "$nxt" != http://* && "$nxt" != https://* ]]; then
+      title="$nxt"
+      i=$next
+    fi
+  fi
+  add_entry "$url" "$title"
+  i=$((i + 1))
+done
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+  split_line "$line"
+done < <(awk 'BEGIN{p=0} /^# LINKS[[:space:]]*$/{p=1; next} p{print}' "$ROOT/download.sh")
+
+if [[ "${#URLS[@]}" -eq 0 ]]; then
   echo "Немає посилань."
-  echo "Вставте URL у кінець файлу download.sh під рядком # LINKS і знову запустіть:"
+  echo "Вставте URL у кінець файлу download.sh під рядком # LINKS."
+  echo "Назву додайте в наступних лапках:"
+  echo "  https://media.kwigacdn.com/.../seg-1-v1-a1.ts \"Назва уроку\""
+  echo "І запустіть:"
   echo "  bash download.sh"
-  echo "Або передайте посилання аргументом:"
-  echo "  bash download.sh \"https://media.kwigacdn.com/...\""
   exit 1
 fi
 
+width=2
+if (( ${#URLS[@]} > 99 )); then
+  width=3
+fi
+
 failed=0
-for link in "${LINKS[@]}"; do
-  download_one "$link" || failed=1
+for (( i = 0; i < ${#URLS[@]}; i++ )); do
+  printf -v number "%0${width}d" "$((i + 1))"
+  download_one "${URLS[$i]}" "$number" "${TITLES[$i]}" || failed=1
   echo
 done
 
@@ -180,5 +276,6 @@ exit "$failed"
 
 # LINKS
 # Вставляйте нові посилання нижче, по одному на рядок.
-# Рядки з # ігноруються. Приклад сегмента 1080p:
-# https://media.kwigacdn.com/key=YQ2dz-s9b34Ox91hUmaMGQ,end=1792437084/media=hlsA/cabinet-6056/h9sSI1SPNKKf/anticeliulitnii_kompleks_1080p.mp4/seg-2-v1-a1.ts?timestamp=1791833838892
+# Назва — у наступних лапках. Рядки з # ігноруються.
+# Номер файлу — це порядок рядка: 01, 02, 03...
+# https://media.kwigacdn.com/key=YQ2dz-s9b34Ox91hUmaMGQ,end=1792437084/media=hlsA/cabinet-6056/h9sSI1SPNKKf/anticeliulitnii_kompleks_1080p.mp4/seg-2-v1-a1.ts?timestamp=1791833838892 "Антицелюлітний комплекс"
