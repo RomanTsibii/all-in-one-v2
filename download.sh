@@ -9,9 +9,10 @@
 #   2. Запустіть:
 #        bash download.sh
 #
-# Файли отримують номер за порядком рядків:
-#   videos/01 - Антицелюлітний комплекс.mp4
-#   videos/02 - Урок 2.mp4
+# Номер береться з папки videos, а не з нуля на кожен запуск:
+#   вже є 01, 02, 03 — наступний файл буде 04.
+#   якщо кілька файлів випадково мають один номер, вони
+#   перенумеровуються за часом: старіший лишається меншим номером.
 #
 # Те саме з командного рядка — посилання, потім назва в лапках:
 #   bash download.sh "https://media.kwigacdn.com/..../seg-1-v1-a1.ts" "Антицелюлітний комплекс"
@@ -96,11 +97,10 @@ sanitize_title() {
   printf '%s\n' "$t"
 }
 
-file_name() {
+video_label() {
   local src="$1"
   local playlist="$2"
-  local number="$3"
-  local title="$4"
+  local title="${3:-}"
   local label=""
 
   if [[ -n "$title" ]]; then
@@ -113,7 +113,135 @@ file_name() {
     label="video"
   fi
 
-  printf '%s - %s.mp4\n' "$number" "$label"
+  printf '%s\n' "$label"
+}
+
+label_of() {
+  local base="${1%.mp4}"
+  if [[ "$base" =~ ^[0-9]+[[:space:]]+-[[:space:]](.+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return
+  fi
+  printf '%s\n' "$base"
+}
+
+number_of() {
+  local base="$1"
+  if [[ "$base" =~ ^([0-9]+)[[:space:]]+-[[:space:]] ]]; then
+    printf '%s\n' "$((10#${BASH_REMATCH[1]}))"
+    return
+  fi
+  printf '0\n'
+}
+
+format_number() {
+  local n="$1"
+  if (( n > 99 )); then
+    printf '%d\n' "$n"
+  else
+    printf '%02d\n' "$n"
+  fi
+}
+
+find_by_label() {
+  local want="$1"
+  local f base
+  local restore=0
+  shopt -q nullglob || restore=1
+  shopt -s nullglob
+  for f in "$OUT_DIR"/*.mp4; do
+    base="$(basename "$f")"
+    [[ "$base" == .* ]] && continue
+    if [[ "$(label_of "$base")" == "$want" ]]; then
+      printf '%s\n' "$f"
+      (( restore == 1 )) && shopt -u nullglob
+      return 0
+    fi
+  done
+  (( restore == 1 )) && shopt -u nullglob
+  return 1
+}
+
+next_serial() {
+  local max=0 count=0 f base num
+  local restore=0
+  shopt -q nullglob || restore=1
+  shopt -s nullglob
+  for f in "$OUT_DIR"/*.mp4; do
+    base="$(basename "$f")"
+    [[ "$base" == .* ]] && continue
+    count=$((count + 1))
+    num="$(number_of "$base")"
+    (( num > max )) && max=$num
+  done
+  (( restore == 1 )) && shopt -u nullglob
+  if (( count > max )); then
+    printf '%s\n' "$((count + 1))"
+  else
+    printf '%s\n' "$((max + 1))"
+  fi
+}
+
+renumber_existing() {
+  mkdir -p "$OUT_DIR"
+  local -a files=()
+  local restore=0
+  shopt -q nullglob || restore=1
+  shopt -s nullglob
+  local f
+  for f in "$OUT_DIR"/*.mp4; do
+    [[ "$(basename "$f")" == .* ]] && continue
+    files+=("$f")
+  done
+  (( restore == 1 )) && shopt -u nullglob
+  (( ${#files[@]} == 0 )) && return 0
+
+  local -A seen=()
+  local dup=0 num
+  for f in "${files[@]}"; do
+    num="$(number_of "$(basename "$f")")"
+    if [[ -n "${seen[$num]+x}" ]]; then
+      dup=1
+      break
+    fi
+    seen[$num]=1
+  done
+  (( dup == 0 )) && return 0
+
+  local -a ordered=()
+  local line
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && ordered+=("${line#*|}")
+  done < <(
+    for f in "${files[@]}"; do
+      stat -c '%Y|%n' "$f"
+    done | sort -n
+  )
+
+  local -a labels=() oldnames=() temps=()
+  local i=0 tmp
+  for f in "${ordered[@]}"; do
+    oldnames+=("$(basename "$f")")
+    labels+=("$(label_of "$(basename "$f")")")
+    tmp="$OUT_DIR/.renumber-$(printf '%04d' "$i").mp4"
+    mv -- "$f" "$tmp"
+    temps+=("$tmp")
+    i=$((i + 1))
+  done
+
+  local n=1 dest label
+  for i in "${!temps[@]}"; do
+    label="${labels[$i]}"
+    dest="$OUT_DIR/$(format_number "$n") - ${label}.mp4"
+    if [[ -e "$dest" ]]; then
+      dest="$OUT_DIR/$(format_number "$n") - ${label}_$n.mp4"
+    fi
+    mv -- "${temps[$i]}" "$dest"
+    if [[ "${oldnames[$i]}" != "$(basename "$dest")" ]]; then
+      echo "Перенумеровую: ${oldnames[$i]} -> $(basename "$dest")"
+    fi
+    n=$((n + 1))
+  done
 }
 
 run_ytdlp() {
@@ -171,13 +299,20 @@ download_one() {
     return 1
   fi
 
-  name="$(file_name "$src" "$playlist" "$number" "$title")"
+  local label existing
+  label="$(video_label "$src" "$playlist" "$title")"
   mkdir -p "$OUT_DIR"
+  if existing="$(find_by_label "$label")"; then
+    echo "Вже скачано, пропускаю: $existing"
+    return 2
+  fi
+
+  name="$(format_number "$number") - ${label}.mp4"
   dest="$OUT_DIR/$name"
 
   if [[ -e "$dest" ]]; then
     echo "Вже скачано, пропускаю: $dest"
-    return 0
+    return 2
   fi
 
   echo "Джерело:  $src"
@@ -268,15 +403,18 @@ if [[ "${#URLS[@]}" -eq 0 ]]; then
   exit 1
 fi
 
-width=2
-if (( ${#URLS[@]} > 99 )); then
-  width=3
-fi
+renumber_existing
+serial="$(next_serial)"
 
 failed=0
 for (( i = 0; i < ${#URLS[@]}; i++ )); do
-  printf -v number "%0${width}d" "$((i + 1))"
-  download_one "${URLS[$i]}" "$number" "${TITLES[$i]}" || failed=1
+  status=0
+  download_one "${URLS[$i]}" "$serial" "${TITLES[$i]}" || status=$?
+  if (( status == 0 )); then
+    serial=$((serial + 1))
+  elif (( status != 2 )); then
+    failed=1
+  fi
   echo
 done
 
@@ -285,7 +423,7 @@ exit "$failed"
 # LINKS
 # Вставляйте нові посилання нижче, по одному на рядок.
 # Назва — у наступних лапках. Рядки з # ігноруються.
-# Номер файлу — це порядок рядка: 01, 02, 03...
+# Номер файлу продовжує вже існуючі відео в папці videos.
 # Можна вставити рядок з консолі браузера як є:
 # download "https://media.kwigacdn.com/key=YQ2dz-s9b34Ox91hUmaMGQ,end=1792437084/media=hlsA/cabinet-6056/h9sSI1SPNKKf/anticeliulitnii_kompleks_1080p.mp4.m3u8"
 # Або посилання і назву в лапках:
