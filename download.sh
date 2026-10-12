@@ -16,6 +16,9 @@
 # Те саме з командного рядка — посилання, потім назва в лапках:
 #   bash download.sh "https://media.kwigacdn.com/..../seg-1-v1-a1.ts" "Антицелюлітний комплекс"
 #
+# Рядки з консолі браузера теж підходять (їх друкує track-videos.js):
+#   download "https://media.kwigacdn.com/..../video.m3u8"
+#
 # Готові файли лягають у папку videos/ поруч зі скриптом.
 # Якщо з'явиться 403, покладіть cookies.txt (формат Netscape) поруч зі скриптом
 # і поставте yt-dlp: pip install -U yt-dlp
@@ -214,6 +217,11 @@ split_line() {
   line="${line%"${line##*[![:space:]]}"}"
   [[ -z "$line" || "$line" == \#* ]] && return 0
 
+  if [[ "$line" =~ ^download[[:space:]]+\"([^\"]+)\"([[:space:]]+\"([^\"]*)\")?[[:space:]]*$ ]]; then
+    add_entry "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]:-}"
+    return 0
+  fi
+
   url="${line%%[[:space:]]*}"
   title=""
   if [[ "$line" != "$url" ]]; then
@@ -278,4 +286,7 @@ exit "$failed"
 # Вставляйте нові посилання нижче, по одному на рядок.
 # Назва — у наступних лапках. Рядки з # ігноруються.
 # Номер файлу — це порядок рядка: 01, 02, 03...
-# https://media.kwigacdn.com/key=YQ2dz-s9b34Ox91hUmaMGQ,end=1792437084/media=hlsA/cabinet-6056/h9sSI1SPNKKf/anticeliulitnii_kompleks_1080p.mp4/seg-2-v1-a1.ts?timestamp=1791833838892 "Антицелюлітний комплекс"
+# Можна вставити рядок з консолі браузера як є:
+# download "https://media.kwigacdn.com/key=YQ2dz-s9b34Ox91hUmaMGQ,end=1792437084/media=hlsA/cabinet-6056/h9sSI1SPNKKf/anticeliulitnii_kompleks_1080p.mp4.m3u8"
+# Або посилання і назву в лапках:
+# https://media.kwigacdn.com/.../seg-2-v1-a1.ts "Антицелюлітний комплекс"
