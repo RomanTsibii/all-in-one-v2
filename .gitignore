@@ -173,3 +173,7 @@ cython_debug/
 #.idea/
 
 .DS_Store
+
+# Скачані відео Kwiga
+videos/
+video_play/
